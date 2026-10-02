@@ -20,24 +20,47 @@ It does not use the tablet at all.
 | setMirrorKey + `wfd://` hand-off | ❌ never reached (connection times out first) |
 | RTSP server + audio stream | implemented, never exercised |
 
-**So: still not working, but the earlier diagnosis was wrong.**
+**So: not working.**
 
-## Correction: the speaker is not rejecting us
+## Correction, and a correction of the correction
 
-An earlier revision of this file claimed the speaker "drops the connection right
-after the capability offer". **That was wrong, and it was my bug.** In one run
-the speaker plainly sent a successful negotiation ack:
+I have now been wrong about this twice. Both errors are recorded because the
+second one matters more.
+
+**First claim (wrong):** "the speaker drops the connection right after the
+capability offer." Retracted correctly -- the real observation was that my
+`parse_frames` returned frames *without consuming them*, so an ack that did
+arrive was never delivered to the handler.
+
+**Second claim (also wrong):** I then asserted "the speaker is NOT rejecting us"
+and cited this successful-looking ack:
 
 ```
 24 14 01 0001 0000008c  03 'ack' 1e 00000083
-{"aesIvType":"4","aesKeyType":"4","authAlgorithmType":"4",
- "authKeyType":"2","integrityType":"1","result":"0"}
+{"aesIvType":"4",...,"result":"0"}
 ```
 
-`result: "0"` means success. The cause was `parse_frames`, which returned frames
-**without consuming them**, so every already-decoded frame was re-parsed on the
-next `recv()` and the ack never reached the handler. Fixed: the parser now
-consumes what it parses.
+**That ack was not mine.** The capture I quoted it from (`spk.pcap`) was filtered
+on `host 10.42.0.127 and port 8899` while the TABLET was still connected, and its
+source addresses are `10.42.0.42` (tablet) <-> `10.42.0.127` (speaker). The NAS
+client never appears in it. So the "successful negotiation" I used to argue the
+speaker accepts us was someone else's session entirely.
+
+**What is actually true**, measured with the tablet off the network and only the
+NAS talking:
+
+* the speaker accepts the TCP connection;
+* it sends `0x28` DEVICE_ID, and `0x1b` heartbeats every 5 s;
+* it replies `0x37` to our `0x36` GET_VERSION;
+* **it closes the connection immediately after our `0x29` AUTH_20**, every time,
+  at every pacing (back-to-back, 0.4 s apart, seq mirrored from the peer);
+* it never sends us a `0x01` ack or a `0x02` challenge.
+
+Also verified: my capability offer frame is byte-identical to the official
+sender's (`24140000010000008103636d641e00000078...`). So the content is not the
+issue -- whatever the speaker objects to happens at or before AUTH_20.
+
+Keep the parser fix: it was a real bug and it is still correct.
 
 ## The real blocker now: a 3-second idle timeout
 
