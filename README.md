@@ -1,3 +1,5 @@
+> 📌 **New session? Start here:** [`reports/MIPLAY_SESSION_HANDOFF.md`](reports/MIPLAY_SESSION_HANDOFF.md) — environment, verified findings, the current blocker, and next steps.
+
 # MiPlay 妙播 — 发送端逆向与 Android Demo
 
 小米妙播（MiPlay / Mi Connect）**发送端协议**的逆向分析与可运行 Android Demo：
