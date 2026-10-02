@@ -261,3 +261,84 @@ PID `0x1100` 的载荷是标准 PES：
 | V2 §4 | ✅ 「音箱拨号平板」方向正确，本文件补充了完整 RTSP 对话 |
 | V4 §3.3 | ✅ `wfd://10.42.0.42:38889?mirrorMode=1` 的来源与此处 `wfd_presentation_URL` 一致 |
 | V5 | ✅ 音频载荷为明文，故第 2/3 步之后无需解密 |
+
+---
+
+## 7. ★ 完整协商对话（实测，从会话第一包开始）
+
+抓包条件：先开双路采集，再断开重连音箱 —— 因此拿到了**从 OPTIONS 开始的完整流程**。
+
+```
+音箱 :57386 ──TCP拨号──> 平板 :40319        (RTSP 协商连接)
+音箱 :57390 ──TCP拨号──> 平板 :40319        (音频返回连接)
+```
+
+### 7.1 逐条请求/响应
+
+| # | 方向 | 消息 | 关键字段 |
+| --- | --- | --- | --- |
+| 1 | 音箱→平板 | `OPTIONS *` | `authMsg`, `authKeyType:3`, `authAlgorithmTypes:7`, `wfd_timer_server_port:<a>:<b>`, `lib_version: OH2P-…` |
+| 2 | 平板→音箱 | `200 OK` | `authKeyType:2`, **`authAlgorithmVal:4`**, `authMsgAck:<64hex>`, `Public: org.wfa.wfd1.0, SETUP, TEARDOWN, PLAY, PAUSE, GET_PARAMETER, SET_PARAMETER` |
+| 3 | 音箱→平板 | `GET_PARAMETER` | 13 个能力名（见 §7.2） |
+| 4 | 平板→音箱 | `200 OK` | 13 项能力值（见 §7.2） |
+| 5 | 音箱→平板 | `SET_PARAMETER` | `wfd_type_encryp: 4 1 1 0 0` / **`wfd_audio_codecs_v2: 1 1`** / `wfd_client_rtp_ports: RTP/AVP/TCP;interleaved mode=play` / **`wfd_presentation_URL: rtsp://10.42.0.42/wfd1.0/streamid=0 none`** |
+| 6 | 平板→音箱 | `200 OK` | `Content-Length: 0` |
+| 7 | 音箱→平板 | `SET_PARAMETER` | **`wfd_trigger_method: SETUP`** ← 触发 SETUP |
+| 8 | 平板→音箱 | `200 OK` | |
+| 9 | 音箱→平板 | **`SETUP rtsp://10.42.0.42/wfd1.0/streamid=0`** | `Transport: RTP/AVP/TCP;interleaved=0-1`<br>**`MultiPort: image_port=0;multi_port=57390`** ← ★ 音频返回端口 |
+| 10 | 平板→音箱 | `200 OK` | `Session: 1350490027;timeout=20`<br>`Transport: RTP/AVP/TCP;interleaved=0-1;` |
+| 11 | 音箱→平板 | **`PLAY rtsp://10.42.0.42/wfd1.0/streamid=0`** | `Session: 1350490027` |
+| 12 | 平板→音箱 | `200 OK` | `Session: 1350490027;timeout=20`<br>**`Range: npt=now-`** |
+| 13 | 音箱→平板 | `TIME_OFFSET` | `TimeOffset:57947083175` |
+| 14 | 平板→音箱 | `200 OK` | |
+| 15 | 音箱→平板 | `VIDEO_LATENCY`（周期） | `latency:848` / `bitrate:341558` / `rtpPacketNum:716` |
+
+（另：平板周期发 `GET_PARAMETER` … `Session: <id>` 作保活。）
+
+### 7.2 双方能力表（原样）
+
+**平板 → 音箱**（`200 OK` 给 `GET_PARAMETER`，`Content-Length: 400`）：
+
+```
+wfd_audio_codecs_v2: 63 3 3
+wfd_video_formats: none
+wfd_video_enctype: none
+wfd_video_gamuttype: none
+wfd_video_bitrate: none
+wfd_current_video_info: none
+wfd_client_rtp_ports: RTP/AVP/TCP;interleaved mode=play
+miplay_support_image: none
+wfd_standby_resume_capability: supported
+wfd_content_SP_protection: 4 1 256 2 1 1 0 0
+wfd_support_secure_win:enable
+device_info: -1 -1 -1 -1 -1 -1 -1
+```
+
+**音箱 → 平板**（`GET_PARAMETER` 请求体，`Content-Length: 299`）：
+
+```
+wfd_content_SP_protection
+wfd_video_formats
+wfd_video_enctype
+wfd_video_gamuttype
+wfd_video_bitrate
+wfd_dynamic_video_enable
+wfd_current_video_info
+wfd_audio_codecs_v2
+wfd_client_rtp_ports
+wfd_tcp_enable
+wfd_tcp_multi_session_enable
+wfd_support_secure_win
+wfd_standby_resume_capability
+```
+
+### 7.3 ★ 实现要点（与之前实现的三处差异）
+
+1. **`authMsgAck` 已解**：`HMAC-SHA256(key=authKey, msg=authMsg)`，两者按 ASCII
+   （见 `AUTH_ACK_ANALYSIS_V1.md` 的修正章节）。实测 4/4 命中。
+2. **SETUP 响应必须回 `Transport`**（带尾部 `;`）与
+   **`Session: <id>;timeout=20`**；PLAY 响应必须回 **`Range: npt=now-`**。
+   我此前只回了 `Session`，缺 `Transport`/`Range`。
+3. **音频走 `MultiPort` 指定的新反连**（`multi_port=57390`），
+   而不是原 RTSP 连接。音箱在 SETUP 里告知该端口，平板应连它（或接受其连接）
+   并在其上发交织音频。

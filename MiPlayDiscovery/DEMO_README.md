@@ -218,3 +218,50 @@ python3 MiPlayDiscovery/tools/verify_live.py <logcat.txt> <capture.pcap>
 ```
 
 覆盖：帧格式 + CRC（13）、MPEG-TS 复用（10）、RTSP 交织帧（4）。
+
+---
+
+## 9. 音频推流（第二轮续）
+
+### 9.1 鉴权已解决 ★
+
+```
+authMsgAck = HMAC-SHA256(key = authKey, msg = authMsg)     ← 标准 HMAC，两者 ASCII
+```
+
+实测 **4/4** 命中（跨两个会话、双向）。`WfdRtspServer.authMsgAck()` 已按此实现，
+`AuthMsgAckTest` 用 4 条真实报文钉死。
+
+### 9.2 完整 RTSP 对话已还原
+
+见 `reports/MIPLAY_AUDIO_PUSH_PROTOCOL.md` §7，含逐条请求/响应与双方能力表。
+三处关键实现修正：`authMsgAck` 算法、`SETUP` 响应必须回 `Transport`、
+`PLAY` 响应必须回 `Range: npt=now-`。
+
+音频返回端口由 **`SETUP` 的 `MultiPort: multi_port=<port>`** 告知，
+`WfdRtspServer` 已解析并暴露 `audioReturnPort`。
+
+### 9.3 新增组件
+
+| 文件 | 作用 |
+| --- | --- |
+| `media/AacLatmEncoder.kt` | MediaExtractor + MediaCodec：本地音频 → AAC AU（可选 ADTS 封装） |
+| `media/AudioPushSession.kt` | 编排：起 RTSP 服务端 → 交 URI → 等 PLAY → 编码/复用/推流 |
+
+### 9.4 仍未上机验证的部分
+
+* **编码器侧封装形态**：音箱到底要 ADTS 还是裸 LATM AU —— 抓包里提取的
+  ES（熵 7.82、卡方 1.2×10⁶）既不像标准 ADTS 也不像 LOAS，**离线无法判定**，
+  必须在设备上试。
+* `MediaCodec` 的 LATM 输出在本机 SoC 上是否可用。
+* 端到端联调（需要平板安装 APK 并真正投送）。
+
+声明的框架（TS/PES/交织帧/RTSP 应答）都已被单元测试与抓包验证；
+**唯一不确定的是音频基本流的封装形态**。
+
+### 9.5 测试
+
+```
+./gradlew :miplay-sender:testDebugUnitTest     # 38/38 通过
+```
+覆盖：帧格式+CRC 13、MPEG-TS 10、交织帧 4、authMsgAck 6、ADTS 5。

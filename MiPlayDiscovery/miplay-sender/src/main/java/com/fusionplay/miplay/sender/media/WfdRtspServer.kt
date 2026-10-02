@@ -108,6 +108,10 @@ class WfdRtspServer(
     var boundPort: Int = -1
         private set
 
+    /** Audio return port the speaker advertised in SETUP, or 0 if not seen yet. */
+    val audioReturnPort: Int
+        get() = sessions.firstOrNull { it.returnPort() != 0 }?.returnPort() ?: 0
+
     /** `wfd://<ip>:<port>?mirrorMode=1`, to be handed to the speaker over 8899. */
     fun presentationUri(): String = "wfd://$localIp:$boundPort?mirrorMode=1"
 
@@ -160,6 +164,8 @@ class WfdRtspServer(
         private var sessionId: Int = 0
         private val cseq = AtomicInteger(0)
         private var playing = false
+        /** Port the speaker will accept audio on, learned from SETUP's MultiPort. */
+        private var audioReturnPort: Int = 0
 
         /** Synthetic RTP-Info / session info echoed to the client. */
         private val random = SecureRandom()
@@ -284,25 +290,39 @@ class WfdRtspServer(
 
         private fun onSetup(req: RtspRequest) {
             if (sessionId == 0) sessionId = sessionCounter.getAndIncrement()
+            // The speaker tells us, in MultiPort, which port it will listen on for
+            // the audio return connection. Capture it so the caller can dial it.
+            val multiPort = req.headers["multiport"]
+            if (multiPort != null) {
+                Regex("multi_port\\s*=\\s*(\\d+)").find(multiPort)?.let {
+                    audioReturnPort = it.groupValues[1].toIntOrNull() ?: 0
+                    listener.onLog("SETUP MultiPort: audio return port = $audioReturnPort")
+                }
+            }
+            // The captured response echoes Transport WITH a trailing ';' and carries Session.
+            val transport = req.headers["transport"]?.let { "$it;" }
+                ?: "RTP/AVP/TCP;interleaved=0-1;"
             sendResponse(
                 req, 200, "OK",
                 sessionHeader = "$sessionId;timeout=20",
-                transport = req.headers["transport"]
-                    ?: "RTP/AVP/TCP;unicast;interleaved=0-1"
+                transport = transport
             )
         }
 
         private fun onPlay(req: RtspRequest) {
             if (sessionId == 0) sessionId = sessionCounter.getAndIncrement()
             playing = true
-            val rtpInfo = "url=${req.startLine.split(' ').getOrNull(1) ?: "*"};seq=0;rtptime=0"
+            // Captured PLAY response: Session + "Range: npt=now-" (no RTP-Info).
             sendResponse(
                 req, 200, "OK",
                 sessionHeader = "$sessionId;timeout=20",
-                rtpInfo = rtpInfo
+                extraHeaders = "Range: npt=now-\r\n"
             )
             listener.onPlay(sessionId)
         }
+
+        /** The speaker's audio return port, learned from SETUP's MultiPort header. */
+        fun returnPort(): Int = audioReturnPort
 
         // ---------------------------------------------------------- responses
         private fun sendResponse(
