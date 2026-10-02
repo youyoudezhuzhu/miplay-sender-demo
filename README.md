@@ -83,6 +83,29 @@ Android 13+ 首次运行如提示**本地网络权限**请允许；mDNS 依赖
 
 ---
 
+## 真机验证（2026-10-02）
+
+对真实小爱音箱 `MiAiSoundbox-OH2P`（`10.42.0.127`）实测：
+
+* **明文握手**：直连音箱，`0x28 DEVICE_ID` → `0x36 GET_VERSION` → `0x37 "2.2.4112519"`，
+  命令码与「音箱先说话」的顺序全部吻合；
+* **控制通道解密**：用平板 logcat 里的当次会话密钥，对**正在运行**的 8899 会话解密：
+
+```
+# control key (authKey) = b'f79ebd58d44d4348'
+# control IV  (streamIV)= b'53af259081674f56'
+dir 55546: padok 18/20
+dir 8899 : padok 18/20
+TOTAL 36/40  -> KEY OK
+```
+
+复现：`python3 MiPlayDiscovery/tools/verify_live.py <logcat.txt> <capture.pcap>`
+
+> 注：**音频推流仍未实现**（见上）。从外部主机也无法发起推流，因为协议方向是
+> **音箱拨号到发送端**，发送端必须自己当 RTSP/WFD 服务器。
+
+---
+
 ## 仓库结构
 
 ```
@@ -94,6 +117,7 @@ MiPlayDiscovery/
 │       ├── MiPlayCrypto.kt         # 会话密钥 + AES-128-CBC 链式编解码
 │       └── MiPlayControlClient.kt  # TCP 8899 客户端 + 握手
 └── miplay-discovery-test/  # Demo App
+├── tools/                  # 真机验证脚本（verify_live.py / miplay_keys.py）
 reports/                    # 逆向分析报告
 .github/workflows/          # CI + Release
 ```

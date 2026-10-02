@@ -137,3 +137,44 @@ Release：`.github/workflows/miplay-release.yml`（打 `v*` tag 自动发布签�
 * 本项目用于**互操作性研究与个人自用**，逆向自用户自己的设备。
 * 不包含、也不分发小米的任何专有二进制（未内嵌 MiLink APK / SDK / `.so`）。
 * 与小米官方无关联。请遵守当地法律与设备服务条款。
+
+---
+
+## 7. 真机验证记录（2026-10-02）
+
+已对**真实小爱音箱**（MiAiSoundbox-OH2P / `10.42.0.127`）做过以下验证。
+
+### 7.1 明文握手（直连音箱，无需平板）
+
+```
+<- 0x28 DEVICE_ID      "56107974241042"     音箱先说话；每次连接都换
+-> 0x36 GET_VERSION    "2.1.4111518"
+<- 0x37                "2.2.4112519"        与 V2 记载一致
+-> 0x29 AUTH_20
+-> 0x02 SAFETY_AUTH    （加密帧）
+```
+
+命令码、帧结构、**音箱先发 DEVICE_ID** 的顺序全部与报告吻合。
+
+### 7.2 控制通道解密（对实时流量）
+
+用从平板 logcat 取到的当次会话密钥，对**正在运行**的 8899 会话解密：
+
+```
+# control key (authKey) = b'f79ebd58d44d4348'
+# control IV  (streamIV)= b'53af259081674f56'
+dir 55546: padok 18/20
+dir 8899 : padok 18/20
+TOTAL 36/40  -> KEY OK
+```
+
+复现：
+
+```bash
+python3 MiPlayDiscovery/tools/verify_live.py <logcat.txt> <capture.pcap>
+```
+
+（`<logcat.txt>` 只需包含 `Cir_Miplay_UUIDGenerator: uuid:<32hex>` 与
+`toJson:authKey:XXXX ,streamKey:YYYY ,streamIV:ZZZZ` 两类行。）
+
+未被解开的 4 帧属于会话中途**密钥轮换**前后的边界帧，属预期现象。
