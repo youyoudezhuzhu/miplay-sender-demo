@@ -1,276 +1,170 @@
-# MIPLAY_CMD_KEY_LIFECYCLE_V6.md
+# MIPLAY_CMD_KEY_LIFECYCLE_V6.md — 最终结果（已破解）
 
-> **[重要更正 · 2026-10-02]** 本文件原先围绕「旧会话 137/137 成功、新会话 0/9」
-> 构建了一个「矛盾」，并据此推测存在第四把 key。
-> **该「137/137 成功」已被证伪**（padok 判据不成立，见
-> `MIPLAY_VERIFIED_FINDINGS_V7.md` 的撤回说明）。
-> 因此本文件的**矛盾叙事作废**；成立的结论只有 §1 的**静态密钥链路**（三条汇编证据）。
-> 8899 的 AES key/IV **至今未确认**，不存在「曾经成功过」。
-
-
-8899 控制通道密钥生命周期：native 数据流核查
-
-> 本轮的**唯一目标**是：不猜算法、不枚举 KDF，直接用 AArch64 数据流确认
-> 8899 AES 实际使用的 key/IV 及其来源。
-> 证据等级：**[实测] / [反汇编] / [源码] / [强推断] / [未知]**
+> **2026-10-02 深夜更新：8899 控制通道已完整破解，并经交叉验证。**
+>
+> 本文件早先围绕「旧会话 137/137 成功、新会话 0/9」构建过一个"矛盾"叙事，
+> 并据此推测存在第四把 key。**该叙事已两次作废**：
+> 1. 「137/137」是 padok 假阳性，已撤回（见 V7 §1.1）；
+> 2. 真正的失败原因是 **key 与会话配对错位**（下详），**不存在第四把 key**。
 
 ---
 
-## 0. 结论摘要
+## 0. 最终结论（全部 [实测]，可复现）
 
-| # | 问题 | 结论 | 等级 |
+```
+8899 控制通道  =  AES-128-CBC
+    key        =  authKey          (ASCII 16 字节, 即 uuid[:16])
+    IV(首帧)   =  authKey          ← 注意：不是 streamIV
+    IV(后续)   =  上一帧密文的最后 16 字节（自由链式）
+    padding    =  零填充，pad 值 = 16 - (len % 16)，恒 1..16
+    完整性     =  帧体中的 CRC-32，覆盖密文，字节反转存放
+```
+
+**静态分析在 §1 预测的 `key=authKey, IV=streamIV` 中，`key` 完全正确；
+`IV` 的首帧取值实际为 `authKey`**（`streamIV` 用于另一条通道）。
+
+---
+
+## 1. 与静态分析的对照
+
+| 项 | 静态预测（V6 §1） | 实测 | 一致？ |
 | --- | --- | --- | --- |
-| 1 | 8899 AES 实际 key 是什么？ | **静态链路指向 `authKey`**，但**新会话实测不能解密**（见 §5） | [反汇编]+[实测] |
-| 2 | 实际 IV 是什么？ | 静态链路指向 `streamIV` | [反汇编] |
-| 3 | key 在哪里生成？ | `ProtocolSession.getKey()`（Java）→ `SET_MIRROR_KEY`/Lyra → `CmdSource` 成员 | [源码]+[反汇编] |
-| 4 | key 是否每 session 随机？ | ✅ 是（重启后由 `621b613181a74036` 变为 `55626959fb4b4702`） | [实测] |
-| 5 | authKey 与 cmdKey 是否相同？ | **静态上是**；**动态上存在无法解释的矛盾** | [反汇编] vs [实测] |
-| 6 | streamKey 是否参与 8899？ | 静态路径**不参与**（只进 `+0x70`，genAesKey(4) 读 `+0x58`） | [反汇编] |
-| 7 | streamIV 是否参与 8899？ | **参与**，作为 IV | [反汇编] |
-| 8 | 是否存在第四把 key？ | 静态分析**未发现**；但不能排除 | [未知] |
-| 9 | 为何旧 session 曾「137/137」、新 session 0/9？ | ~~核心矛盾~~ **前提已撤回**：137/137 是假阳性 | [已撤回] |
-| 10 | `SAFETY_AUTH` 用哪个 key？ | 同一 cipher 对象，故与 8899 同 key/IV | [反汇编] |
+| AES key | `SafetyKeyDeal+0x58` = authKey | **authKey** | ✅ |
+| AES IV | `SafetyKeyDeal+0x88` = streamIV | 首帧为 **authKey**，之后链式 | ⚠️ 部分 |
+| 模式 | CBC + 零填充 + 链式 | CBC + 零填充 + **自由链式** | ✅ |
+| 第四把 key | 未发现 | **确认不存在** | ✅ |
 
-**最重要的产出**：密钥链路已用**三条独立汇编证据**钉死（§1），
-因此问题**不在静态链路**，而在于「我拿到的那把 authKey 是否就是该会话的 authKey」。
+→ **三条汇编证据推出的 key 映射是对的**；错的只是我把 IV 的首值认成了 streamIV。
 
 ---
 
-## 1. ★ 汇编级验证：三条独立证据锁定映射
+## 2. 为什么此前反复失败（真正的根因）
 
-### 1.1 证据一 —— 构造函数写入的成员布局
-
-`SafetyKeyDeal::SafetyKeyDeal(string,uint16,string,uint16,string)` @`0x2566cc` **[反汇编]**：
-
-```asm
-mov  x22, x5              ; arg5 = 第 3 个 string
-mov  w21, w4              ; arg4 = 第 2 个 uint16
-mov  x23, x3              ; arg3 = 第 2 个 string
-mov  w20, w2              ; arg2 = 第 1 个 uint16
-mov  x19, x0              ; this
-bl   basic_string::basic_string      ; this+0x00 = arg1  (拷贝构造)
-strh w20, [x19, #0x18]               ; this+0x18 = arg2 (uint16)
-add  x20, x19, #0x20
-bl   basic_string::basic_string      ; this+0x20 = arg3
-strh w21, [x19, #0x38]               ; this+0x38 = arg4 (uint16)
-add  x21, x19, #0x40
-bl   basic_string::basic_string      ; this+0x40 = arg5
-strh wzr, [x19, #0x58]               ; 后三个成员初始化为空
-strh wzr, [x19, #0x70]
-strh wzr, [x19, #0x88]
-```
-
-布局（`0x00/0x20/0x40` 为 string，`0x18/0x38/0x58/0x70/0x88` 处有 2 字节初始化）：
+**不是算法问题，是"密钥—会话配对"错位。**
 
 ```
-+0x00 string A      +0x18 uint16 ta
-+0x20 string B      +0x38 uint16 tb
-+0x40 string C
-+0x58 <成员 4>      ← 后续被当作 string 写入（见 1.2）
-+0x70 <成员 5>
-+0x88 <成员 6>
+16:07:40   8899 会话建立
+   │
+   │        ← 这 102 秒内的 key 从未被记录
+   │
+16:09:22   唯一一次密钥生成（晚 102 秒）
 ```
 
-### 1.2 证据二 —— `onSessionConnect` 把 CmdSource 成员拷进 SafetyKeyDeal
+用 16:09:22 的 key 去解 16:07:40 的会话 → **必然失败**。
 
-`CmdSource::onSessionConnect` @`0x175ef0` **[反汇编]**：
-
-```asm
-ldr  x8, [x19, #0x3b0]        ; x8 = CmdSource->mSafetyKey  (SafetyKeyDeal*)
-cbz  x8, ...
-add  x1, x19, #0x360          ; 源 = CmdSource+0x360
-add  x0, x8,  #0x58           ; 目的 = SafetyKeyDeal+0x58
-bl   basic_string::operator=  ; ★ +0x58 ← CmdSource+0x360
-ldr  x8, [x19, #0x3b0]
-add  x1, x19, #0x378
-add  x0, x8,  #0x70
-bl   basic_string::operator=  ; ★ +0x70 ← CmdSource+0x378
-ldr  x8, [x19, #0x3b0]
-add  x1, x19, #0x390
-add  x0, x8,  #0x88
-bl   basic_string::operator=  ; ★ +0x88 ← CmdSource+0x390
-```
-
-→ **三个成员确实是 `std::string`**（构造函数的 `strh wzr` 只是置空标志字节），
-且来源是 `CmdSource+0x360 / +0x378 / +0x390`。
-
-### 1.3 证据三 —— `setLyraInfo` 把哪个 JSON 字段写进哪个偏移
-
-`CmdSource::setLyraInfo` @`0x16d578` **[反汇编 + 反编译交叉核对]**：
-在每个 `operator=` 之前**紧邻**构造的是 JSON 键字面量：
-
-```c
-builtin_strncpy(local_d7,"authKey",8);    ...  operator=(this + 0x360, &local_c0);   // authKey
-builtin_strncpy(local_d7,"streamKe",8);   ...  operator=(this + 0x378, &local_c0);   // streamKey
-builtin_strncpy(local_d7,"streamIV",8);   ...  operator=(this + 0x390, &local_c0);   // streamIV
-```
-
-### 1.4 三证据合起来
+**修复方法**：在**同一时间窗口内**先清 logcat、再建立全新会话。
+最后一次采集即满足此条件：
 
 ```
-JSON "authKey"   → CmdSource+0x360 → SafetyKeyDeal+0x58
-JSON "streamKey" → CmdSource+0x378 → SafetyKeyDeal+0x70
-JSON "streamIV"  → CmdSource+0x390 → SafetyKeyDeal+0x88
+23:47:01.440  get authKey     → uuid:14e7e6475d2142ddba150adb827211c1
+23:47:01.441  get streamKey   → uuid:3ba139cc95df4284a839a204906c63ce
+23:47:01.441  get streamIV    → uuid:93c0822773324746ba48ec238a5c0bdd
+23:47:01.441  toJson:authKey:42dd ,streamKey:4284 ,streamIV:4746
+23:47:01.500  8899 SYN  10.42.0.42:50150 → 10.42.0.127:8899      ← 相差 609 毫秒
 ```
 
-`SafetyKeyDeal::genAesKey(str,type)` @`0x256df0` **[反汇编]**：
-
-```asm
-cmp  w20, #4
-b.ne ...
-add  x1, x0, #0x58        ; type==4 -> 读 +0x58
-bl   basic_string::operator=
-```
-
-`genAesIv(str,type)` @`0x256fbc`：type==4 → `add x1, x0, #0x88`。
-`genAuthKey(type)` @`0x256a18`：type==2 → 读 `+0x58`。
-
-**因此静态链路是**（与 V4 一致，但**现在有三条独立汇编证据**）：
-
-```
-8899 AES key = authKey  (SafetyKeyDeal+0x58)
-8899 AES IV  = streamIV (SafetyKeyDeal+0x88)
-mode = CBC, 零填充, 跨帧链式
-```
-
-### 1.5 顺带纠正：`safetyIntegrityData` 与鉴权无关
-
-`_Z19safetyIntegrityDatajjPKhm` @`0x2576e4`，全部 20 条指令 **[反汇编]**：
-
-```asm
-cmp  w0, #1
-b.ne ret_m1                ; type != 1 -> return -1
-mov  w0, wzr
-bl   av_crc_get_table      ; FFmpeg
-b    av_crc                ; FFmpeg CRC-32
-```
-
-它只是 `av_crc` 包装，**不是鉴权**（V6 前一轮的猜测已排除）。
+→ **配对成功后，一次命中。**
 
 ---
 
-## 2. 密钥生成与投递链路 [源码 + 反汇编]
+## 3. ★ 交叉验证（决定性证据）
+
+解密出的明文里，两个方向各含一组 `authMsg` / `authMsgAck`：
 
 ```
-ProtocolSession.getKey()                     [源码]
-    System.arraycopy(UUIDGenerator.getUUID().getBytes(UTF_8), 0, b, 0, 16)
-    → 16 个 ASCII 字符（不是 hex 解码）
-        │
-        ▼  MiplaySessionCtrProxy.setMirrorKey(json)
-JNI CmdSessionControl.setMirrorKey @0x260df4   [反汇编]
-    vtable+0xa8(CmdControl, jstring)   ← 字符串进入 native
-        │
-        ▼
-CmdSource::setLyraInfo(json) @0x16d578        [反汇编]
-    "authKey" → +0x360 ; "streamKey" → +0x378 ; "streamIV" → +0x390
-        │
-        ▼
-CmdSource::onSessionConnect() @0x175cd0       [反汇编]
-    → SafetyKeyDeal+0x58 / +0x70 / +0x88
-        │
-        ▼
-CmdSource::dealSafetyInfoAck()                [反汇编]
-    ack JSON 给出 aesKeyType / aesIvType
-    genAesKey(input, aesKeyType) → CmdSource+0x308
-    genAesIv (input, aesIvType ) → CmdSource+0x320
-        │
-        ▼
-new SafetyDataDeal(1, integrityType, key@0x308, iv@0x320)   → CmdSource+0x3c0
-        │
-        ▼
-SafetyDataDeal::encryptData/decryptData
-    AES-128-CBC + 零填充 + 跨帧链式
+方向 平板→音箱 (dir 50150):
+    authMsg    = 78c4a5bafb0d6a3e3a6b75494acd991a
+    authMsgAck = 464294bb09b495cb9699cc4a3cfff758174ed1c1ea5692538699457a1b1b75e6
+
+方向 音箱→平板 (dir 8899):
+    authMsg    = d99d45abcdc7973b96721118447a2323
+    authMsgAck = c636354ddfb86084b272670d4fc20e8cd6fa8dc6d91689e749fc900bb5227b3f
 ```
 
-**`setMirrorKey` 不产生新密钥**：它只是把 JSON 落到成员（§1.3），
-没有二次派生、没有 hex 转换。
+计算（用**同一把** `authKey = 14e7e6475d2142dd`）：
+
+```
+HMAC-SHA256(authKey, 78c4a5bafb0d6a3e3a6b75494acd991a) = c636354ddfb86084b272670d...
+      ↑ 该值恰好等于【反方向】的 authMsgAck              ✅ MATCH
+
+HMAC-SHA256(authKey, d99d45abcdc7973b96721118447a2323) = 464294bb09b495cb9699cc4a...
+      ↑ 该值恰好等于【反方向】的 authMsgAck              ✅ MATCH
+```
+
+**这是决定性的**：
+* 明文是从 **8899 加密通道解出来的**（依赖 key+IV+链式全对）；
+* 解出的 `authMsgAck` 又**恰好是**对向 `authMsg` 的 HMAC（依赖 key 全对）；
+* **两条互相独立的协议在同一把 key 上自洽** → 排除任何巧合。
+
+→ **密钥、IV、模式、链式，四项同时得到证明。**
 
 ---
 
-## 3. 已实测的事实
+## 4. 解出的协议明文（样例）
 
-| 事实 | 数据 | 等级 |
-| --- | --- | --- |
-| 鉴权算法 | `authMsgAck = HMAC-SHA256(authKey, authMsg)`，7/7 向量命中 | [实测] |
-| authKey 非身份派生 | DEVICE_ID/版本的各种 md5/sha1/sha256 组合 0 命中 | [实测] |
-| authKey 每会话变化 | `621b613181a74036` → `55626959fb4b4702`（重启前后） | [实测] |
-| DEVICE_ID 动态 | `66342224888756` / `66425669764754` | [实测] |
-| 旧会话「解密成功」 | ~~137/137~~ **已撤回（假阳性）** | [已撤回] |
-| 新会话解密失败 | 多个会话用对应 authKey 得到 **0/9**、**0/64** | [实测] |
+```
+cmd=0x02  \x03cmd\x1e\x00\x00\x005{\n\t"authMsg": "78c4a5bafb0d6a3e3a6b75494acd991a" \n} \n
+cmd=0x03  \x03ack\x1e\x00\x00\x00h{\n\t"authMsgAck": "464294bb09b495cb96..." \n\t"result": "0" \n} \n
+cmd=0x58  {"sourceName":"PumpedUp的Redmi Pad SE","mSourceBtMac":"AEA2A90766740E16316088BADFE0BBA4","canAlonePlayCtrl":"0","canHeadsetCtrl":"1"}
+cmd=0x36  2.1.4111518\x00
+cmd=0x00  \x03cmd\x1e\x00\x00\x00x{\n\t"aesIvTypes": "7",\n\t"aesKeyTypes": "7",\n\t"authAlgorithmTypes": "7",\n\t"authKeyTypes": "3",\n\t"integrityTypes": "1" \n} \n
+```
 
----
-
-## 4. 核心矛盾（本轮未能解决）
-
-> ~~**静态链路证明 key=authKey，且 15:32 会话实测 137/137；
-> 但此后每个会话用其 authKey 都解不开（0/9 起）。**
-
-我确认过的可能性（逐条排除或仍未排除）：
-
-| 假设 | 检验 | 结果 |
-| --- | --- | --- |
-| key 用 hex 解码而非 ASCII | 两种都试 | ❌ 都不是 |
-| IV 不是 streamIV | 试 streamKey/authKey/zero 作 IV | ❌ 都不成立 |
-| key 是 streamKey | 用 streamKey 试 | ❌ |
-| 链式模式不对 | chain / fixed 都试 | ❌ |
-| 取错会话的 authKey | 时间戳对齐后仍 0 命中 | ❌ |
-| 存在第四把 key（如独立 cmdKey） | 静态未发现；无法动态读取 | **[未知]** |
-
-**★ 关键怀疑（[强推断]）**：
-`generatorMirrorKey()`（`MultiMirrorControl` 路径）生成的密钥，
-与 **8899 `CmdSessionControl` 通道**使用的密钥**可能不是同一对**。
-
-支持这个怀疑的观察 **[实测]**：
-* logcat 里 `generatorMirrorKey` 与 `CmdSessionControl.setMirrorKey` **成对出现**，
-  都在 `MultiMirrorControl.setEncryptKeys` 之后；
-* 但 `mirrorMode=1` 的**屏幕镜像**会话与**音频投送**会话在设备上是**两条不同的通道**
-  （V4 §9.1 已实测同时存在多套会话密钥）；
-* `setMirrorKey` 是**发给对端**的动作，不必然等于**本端 8899 cipher 使用的 key**。
-
-**也就是说**：`CmdSource+0x360` 可能不是由 `setMirrorKey` 填充，
-而是由**另一条路径**（接收对端下发的 Lyra 密钥，即
-`CmdControl::setLyraInfo` ← `connectCmdSession2` 的 vtable+0x200）填充。
-
-→ 这正好能解释「同一套方法某次成功、换 session 就失败」：
-**我有时取到的是本端 cipher 的 key，有时取到的是发给对端的 key。**
+这也**顺带解出 `SAFETY_AUTH` 所在位置**：`cmd=0x02` 的 `authMsg` 就是
+参与 WFD 鉴权的挑战值 —— 即 §3 交叉验证的对象。
 
 ---
 
-## 5. 需要的下一步（唯一的解决路径）
+## 5. 复用方法（供第三方实现）
 
-静态分析已到极限（无法动态读内存：`/proc/<pid>/mem` 权限拒绝、
-`com.milink.service` 非 debuggable、SELinux Enforcing）**[实测]**。
+```python
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-要终结这个矛盾，必须**在 AES 初始化前一刻拿到 key**。可选：
+def decrypt_8899(frames, auth_key: str):
+    """frames: [(cmd, pad, ciphertext), ...] in wire order.
+       Each DIRECTION keeps its own IV chain."""
+    key = auth_key.encode('ascii')       # uuid[:16], ASCII, NOT hex-decoded
+    cur = key                            # first IV == authKey
+    out = []
+    for cmd, pad, ct in frames:
+        if not ct or len(ct) % 16: continue
+        pt = Cipher(algorithms.AES(key), modes.CBC(cur)).decryptor().update(ct)
+        out.append((cmd, pt[:len(pt)-pad] if 0 < pad <= len(pt) else pt))
+        cur = ct[-16:]                   # free-running chain
+    return out
+```
 
-1. **Frida / ptrace 插桩**（需 root 或 debuggable 构建）
-   * hook `AES_init_ctx_iv`（或 `SafetyDataDeal::SafetyDataDeal`），
-     打印传入的 key/IV 指针内容；
-   * 同时 hook `CmdSource::setLyraInfo` 与 `SafetyKeyDeal::genAesKey`，
-     对比两个来源的值是否一致。
-   * ★ 这是**最直接**的办法，能一次性回答 §0 的全部 10 问。
-2. **区分两条路径的赋值**
-   * 静态追踪 `CmdControl::setLyraInfo` 的调用者
-     （`connectCmdSession2` 的 vtable `+0x200`）与
-     `CmdSessionControl::setMirrorKey`（vtable `+0xa8`），
-     确认 **`CmdSource+0x360` 到底由哪一个写入**；
-   * 若由**接收**路径写入，那么本端 cipher 的 key 是**对端下发的**，
-     与 `generatorMirrorKey` 无关 —— 这能解释全部现象。
-3. **对照实验**
-   * 抓一次「投送音频」与一次「纯屏幕镜像」的会话，
-     比较两者 8899 cipher 是否使用不同 key。
-
-> 我倾向 **方案 2 先做**（纯静态、零设备代价），
-> 若仍不能定论再上 **方案 1**（插桩）。
+**注意事项（都是踩过的坑）**：
+1. `authKey` 取 **ASCII**，**不要** hex 解码；
+2. 每个方向**各自**维护 IV 链，不要混用；
+3. 首帧 IV 是 **authKey**，不是 streamIV；
+4. **密钥必须与该会话同窗口采集** —— 否则一定失败（§2）。
 
 ---
 
-## 6. 本轮诚实结论
+## 6. 撤回与纠正汇总
 
-* **静态密钥链路已 100% 钉死**（三条独立汇编证据），这部分是确定的知识；
-* **但「设备上 8899 实际用的 key」仍未被稳定复现** —— 这是本轮的核心未解项；
-* 我**没有**找到第四把 key 的静态证据，但**也不能排除**；
-* 因此**未能**解决 `SAFETY_AUTH`，也**未能**完成从 NAS 推送音频。
+| 项 | 处置 |
+| --- | --- |
+| 「137/137 KEY OK」 | ❌ 撤回（padok 假阳性），已从 V4/CHANNEL_STATUS/HANDOFF 删除 |
+| 「存在第四把 cmdKey」 | ❌ 不存在；该推测依据已消失 |
+| 「静态成立但动态矛盾」 | ❌ 作废；真实原因是配对错位 |
+| 「`OAuth::hmac` opad 为 0x6a」 | ❌ 撤回；是标准 HMAC（0x5c） |
+| 「`safetyIntegrityData` 是鉴权」 | ❌ 排除；它只是 `av_crc` 包装 |
 
-按任务要求，本轮**没有**以「可能是 HMAC / 可能是 KDF」作为结论 ——
-结论是「静态链路确定 + 动态行为不一致」，并给出了矛盾的精确定位与解法定向。
+---
+
+## 7. 对整体项目的影响
+
+**控制通道阻塞点解除。** 现在第三方 sender 可以：
+
+1. 自行生成 `authKey/streamKey/streamIV`（各取 `uuid[:16]`）；
+2. 用上面算法**双向**加解密 8899；
+3. 正确应答 WFD 的 `authMsg`（`HMAC-SHA256(authKey, authMsg)`）；
+4. 因此**有可能**完整复现官方 sender 的会话。
+
+**仍未解决**（独立的后续问题）：
+* 从 NAS 当 sender 时音箱拒绝 `SAFETY_AUTH` —— 现在可以真正看到该帧明文，
+  预计可用本轮方法定位（**这是下一步**）；
+* 音频 ES 的确切编码封装；
+* 端到端推流尚未在设备上跑通。

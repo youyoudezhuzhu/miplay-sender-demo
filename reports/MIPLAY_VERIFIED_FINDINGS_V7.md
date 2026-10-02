@@ -1,3 +1,13 @@
+> # ✅ 2026-10-02 深夜更新：8899 控制通道已破解
+>
+> `key = authKey`（ASCII）、`IV(首帧) = authKey`、之后自由链式、
+> AES-128-CBC + 零填充。已由**两条独立协议的交叉验证**证明。
+> 详见 [`MIPLAY_CMD_KEY_LIFECYCLE_V6.md`](./MIPLAY_CMD_KEY_LIFECYCLE_V6.md) §0/§3，
+> 回归脚本 `MiPlayDiscovery/tools/verify_cmd_channel.py`（ALL CHECKS PASSED）。
+>
+> 此处 §4 的 U1/U2/U3 由「[未知]」升级为「已确认」。§1.1 的撤回**依然有效**
+> （137/137 确实是假阳性；真实失败原因是 key 与会话配对错位，不是算法错）。
+
 # MIPLAY_VERIFIED_FINDINGS_V7.md
 
 MiPlay（小米妙播）逆向工程 —— **已确认结论清单与撤回记录**
@@ -14,11 +24,13 @@ MiPlay（小米妙播）逆向工程 —— **已确认结论清单与撤回记�
 **已破解**：局域网发现、控制连接结构、`SafetyKeyDeal` 成员映射、
 WFD/RTSP 鉴权算法、完整音频承载结构（TS/PES/交织帧）。
 
-**未破解**：**8899 控制通道的实际 AES key 与 IV**、其与具体 session 的
-生命周期关联、`SAFETY_AUTH` 在状态机中的确切位置、
-第三方 sender 能否完整独立复现小米 sender。
+**已破解（本轮新增）**：**8899 控制通道的 AES key 与 IV**、其与具体 session 的
+生命周期关联（须同窗口采集）。→ 详见 V6 §0/§3。
 
-**结论：尚未实现向音箱推送音频。**
+**未破解**：第三方 sender 能否完整独立复现小米 sender（音箱曾在
+`SAFETY_AUTH` 阶段拒绝 NAS）、音频 ES 的确切编码封装。
+
+**结论：端到端音频推流仍未在设备上跑通。**
 
 ---
 
@@ -215,9 +227,9 @@ MPEG-TS     : PAT 0x0000 / PMT 0x0100 / PCR 0x1000 / 音频 PES 0x1100 (stream_i
 
 | # | 未破解 | 状态 |
 | --- | --- | --- |
-| U1 | **8899 实际 AES key** | [未知] |
-| U2 | **8899 实际 IV** | [未知] |
-| U3 | key 与**具体** 8899 session 的生命周期关联 | [未知] |
+| U1 | ~~**8899 实际 AES key**~~ | ✅ **已确认 = authKey**（ASCII）|
+| U2 | ~~**8899 实际 IV**~~ | ✅ **已确认：首帧=authKey，之后链式** |
+| U3 | ~~key 与具体 session 的生命周期关联~~ | ✅ **已确认：须同窗口采集**（错位则必然失败）|
 | U4 | `SAFETY_AUTH` 在状态机中的确切位置与载荷 | [未知] |
 | U5 | 第三方 sender 能否完整独立复现小米 sender | [未知] |
 | U6 | 音频 ES 的确切编码封装 | [未知] |
