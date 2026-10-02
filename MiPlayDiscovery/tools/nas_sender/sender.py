@@ -88,8 +88,6 @@ class NasSender:
             self.rx += data
             for outer, cmd, seq, body in parse_frames(self.rx):
                 self.handle(outer, cmd, seq, body)
-            if self.rx and len(self.rx) > (1 << 20):
-                self.rx.clear()
 
     def handle(self, outer, cmd, seq, body):
         if body[:4] == b'\x00\x07\x01\xe0':
@@ -107,7 +105,7 @@ class NasSender:
             self._on_challenge(pt)
         elif cmd == 0x01:
             self.negotiated = pt
-            self.log('[ctrl] <- 0x01 negotiate ack %r' % pt[:140])
+            self.log('[ctrl] <- 0x01 negotiate ack %r' % pt[:160])
         else:
             self.log('[ctrl] <- cmd=0x%02x %s %r' % (cmd, tag, pt[:90]))
 
@@ -165,12 +163,18 @@ class NasSender:
         # (verified in the capture: plaintext body, not the 000701e0 envelope).
         self.send(CMD_OPEN, tlv('cmd', offer), outer=CMD_WRAPPER, plain=True)
         # wait for the speaker's negotiation ack (plaintext cmd 0x01)
-        for _ in range(20):
+        for _ in range(40):
             if self.negotiated:
                 break
             time.sleep(0.25)
-        self.log('[ctrl] negotiated=%s' % self.negotiated)
-        time.sleep(0.5)
+        self.log('[ctrl] negotiated=%s' % (self.negotiated or b'<none>')[:120])
+        # give the speaker time to send its encrypted auth challenge (cmd 0x02)
+        for _ in range(40):
+            if self.auth_msg:
+                break
+            time.sleep(0.25)
+        self.log('[ctrl] challenge seen=%s' % bool(self.auth_msg))
+        time.sleep(0.3)
 
         # 4. tell the speaker where to dial, and with which keys
         self.send(CMD_SET_MIRROR_KEY, json.dumps({

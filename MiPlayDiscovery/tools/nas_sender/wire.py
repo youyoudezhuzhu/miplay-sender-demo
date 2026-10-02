@@ -127,20 +127,34 @@ def frame(cmd: int, seq: int, body: bytes, outer: int = 0) -> bytes:
 
 
 def parse_frames(buf: bytearray):
-    """Yield (outer, cmd, seq, body) without resyncing on 0x24 inside payloads."""
+    """Return [(outer, cmd, seq, body)] and CONSUME what was parsed.
+
+    The previous version returned frames but never advanced the caller's buffer,
+    so every already-decoded frame was re-parsed on the next recv(). That made
+    the speaker's negotiation ack invisible and led me to conclude - wrongly -
+    that the speaker was dropping the connection.
+
+    It also resynced byte-by-byte, which can split a frame. Here, a 0x24 that
+    does not yield a complete, plausible frame is skipped, but successfully
+    parsed frames are removed from `buf`.
+    """
     out = []
     i = 0
-    while i + 9 <= len(buf):
+    n = len(buf)
+    while i + 9 <= n:
         if buf[i] != 0x24:
             i += 1
             continue
-        n = struct.unpack('>I', buf[i + 5:i + 9])[0]
-        if i + 9 + n > len(buf) or n > (1 << 22):
-            i += 1
+        body_len = struct.unpack('>I', buf[i + 5:i + 9])[0]
+        if i + 9 + body_len > n or body_len > (1 << 22):
+            i += 1                      # incomplete or bogus; wait for more data
             continue
-        out.append((buf[i + 1], buf[i + 2], struct.unpack('>H', buf[i + 3:i + 5])[0],
-                    bytes(buf[i + 9:i + 9 + n])))
-        i += 9 + n
+        out.append((buf[i + 1], buf[i + 2],
+                    struct.unpack('>H', buf[i + 3:i + 5])[0],
+                    bytes(buf[i + 9:i + 9 + body_len])))
+        i += 9 + body_len
+    if i:
+        del buf[:i]
     return out
 
 

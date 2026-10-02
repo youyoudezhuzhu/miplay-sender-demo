@@ -15,13 +15,51 @@ It does not use the tablet at all.
 | connect to the speaker's 8899 port | ✅ works |
 | plaintext handshake (DEVICE_ID / version) | ✅ works — the speaker replies |
 | send GET_VERSION / AUTH_20 | ✅ accepted |
-| capability offer (byte-exact copy of the official sender) | ⚠️ speaker drops the connection right after |
-| encrypted SAFETY_AUTH exchange | ❌ never reached |
-| setMirrorKey + `wfd://` hand-off | ❌ never reached |
+| capability offer (byte-exact copy of the official sender) | ✅ verified byte-identical to the official frame |
+| encrypted SAFETY_AUTH exchange | ⚠️ the speaker DOES send its challenge; our reply path is untested end to end |
+| setMirrorKey + `wfd://` hand-off | ❌ never reached (connection times out first) |
 | RTSP server + audio stream | implemented, never exercised |
 
-**So: not working yet.** The speaker accepts a third-party connection and the
-first two handshake messages, then closes once the capability offer goes out.
+**So: still not working, but the earlier diagnosis was wrong.**
+
+## Correction: the speaker is not rejecting us
+
+An earlier revision of this file claimed the speaker "drops the connection right
+after the capability offer". **That was wrong, and it was my bug.** In one run
+the speaker plainly sent a successful negotiation ack:
+
+```
+24 14 01 0001 0000008c  03 'ack' 1e 00000083
+{"aesIvType":"4","aesKeyType":"4","authAlgorithmType":"4",
+ "authKeyType":"2","integrityType":"1","result":"0"}
+```
+
+`result: "0"` means success. The cause was `parse_frames`, which returned frames
+**without consuming them**, so every already-decoded frame was re-parsed on the
+next `recv()` and the ack never reached the handler. Fixed: the parser now
+consumes what it parses.
+
+## The real blocker now: a 3-second idle timeout
+
+Measured directly: connect, stay completely silent, and the speaker closes the
+socket after **3.0 s**. So this is a keepalive/pacing requirement, not a
+protocol rejection. The official sender interleaves messages quickly enough to
+stay inside that window; this sender currently does not.
+
+Measured sequence-number behaviour (the speaker's `0x28` carries a high seq such
+as 1464, and its replies use seq 0):
+
+```
+<- 0x28 DEVICE_ID      seq=1464
+-> 0x36 GET_VERSION    seq=0        <- speaker then replies 0x37
+<- 0x37 version        seq=0
+   [EOF ~3s]
+```
+
+Next step: drive the handshake without idle gaps inside the 3s window (and/or
+send heartbeats), then observe the `0x01` ack and the encrypted `0x02`
+challenge. The challenge reply path is already implemented
+(`_on_challenge` -> `HMAC-SHA256(authKey, authMsg)`).
 
 ## What is already proven
 
