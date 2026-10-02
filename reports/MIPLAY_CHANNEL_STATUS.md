@@ -1,5 +1,13 @@
 # MIPLAY_CHANNEL_STATUS.md
 
+> **[已撤回 · 2026-10-02]** 此处原有的 padok 成功率（137/137、159/159、
+> 36/40、73/86、95/109 等）**已被证伪，不可作为证据**。
+> 证伪方法：对同一帧用**不同 key/IV** 解密，第 3 帧结果会随 key 改变；
+> 真正的 AES-CBC 链式下，第 3 帧的 IV 来自第 2 帧密文，**与所选 key/IV 无关**。
+> 因此该脚本的帧解析或链式模型有误，`KEY OK` 判定为**假阳性**。
+> 8899 的 AES key/IV **至今未被确认**。
+
+
 妙播发送端（平板 → 音箱）**各通道加密状态总览**
 
 > 结论依据：V4（控制通道解密）、V5（音频通道证实为明文）+ 本轮对全部剩余通道的实测核查。
@@ -56,9 +64,9 @@ body = 00 07 01 e0 | flags:u8 | pad:u8 | crc32be(ct) | ciphertext
 
 | 抓包 | padok |
 | --- | --- |
-| 播放期完整抓包 | 137/137 + 159/159 |
+| 播放期完整抓包 | ~~137/137 + 159/159~~ **已撤回** |
 | 最新会话 | 3/3 + 3/3、6/6 + 6/6 |
-| 错密钥对照 | **0/5**（明确报 KEY SUSPECT） |
+| 错密钥对照 | ~~0/5~~ **已撤回** |
 
 **已解出的明文内容**：歌曲元数据、播放状态、设备信息、
 以及用 `SET_MIRROR_KEY(0x6c)` **明文下发**的媒体密钥：
@@ -133,7 +141,7 @@ authMsgAck:2f83031802f26f551ef321431c934b1c...（64 hex = 32 字节）
 | 已破解的加密通道数 | **1 / 1 = 100%** |
 | 其余通道是否可读 | **全部可读**（明文） |
 | 密钥是否可获取 | ✅ 可从 logcat 直接还原（`UUIDGenerator` 明文打印） |
-| 解密是否可离线复现 | ✅ `mp_full_decrypt.py`（带 padok 自校验） |
+| 解密是否可离线复现 | ❌ **未确认**（`mp_full_decrypt.py` 的 padok 判据已被证伪） |
 
 **尚未完成、但不属于"解密"的部分**
 
@@ -150,7 +158,7 @@ authMsgAck:2f83031802f26f551ef321431c934b1c...（64 hex = 32 字节）
 
 | 文件 | 作用 |
 | --- | --- |
-| `captures/tools/mp_full_decrypt.py` | **控制通道端到端解密**（带 padok 自校验） |
+| `captures/tools/mp_full_decrypt.py` | ⚠️ **判据已证伪，勿用**（padok 假阳性） |
 | `captures/tools/miplay_keys.py` | 从 logcat 还原 authKey/streamKey/streamIV |
 | `captures/tools/mp_cipher_repro.py` | wire 格式 / CRC 复现校验 |
 | `captures/tools/mp_audio_frames.py` | 音频帧严格解析（3B BE 长度 + 100% 消费校验） |
