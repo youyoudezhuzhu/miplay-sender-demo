@@ -271,3 +271,63 @@ ANetworkSession::destroySession(...);          // 直接销毁会话
 | `safetyIntegrityData` | 头号嫌疑 | **排除**：它只是 `av_crc` 包装 [反汇编] |
 | 可绕过性 | 未知 | **强推断不可绕过**（401 + destroySession）[反汇编] |
 | 是否解出实测配对 | — | ❌ 仍未命中，缺 §7.1 的 U1–U4 |
+
+---
+
+## 9. 补充：`authMsg` 随机性检验（判断是否为纯函数）
+
+**[实测]** 两次不同会话的挑战值（均为发送端→音箱方向）：
+
+| 会话 | `authMsg` | `authMsgAck` |
+| --- | --- | --- |
+| A（11:15 抓包） | `fcb9521c17e994e450fa59963d45f0e8` | `cab7a6f7a35f9caa0ac8bd631df85319753c32e119d4adbe4ae30853efb76482` |
+| B（11:15 抓包，反方向） | `accae1fff32df94d2f7392aea7c63bac` | `2f83031802f26f551ef321431c934b1cd563b0e3e2b4b3d289ce2206ab75e437` |
+
+两个 `authMsg` 不重复 → **每次会话随机生成** [实测]。
+这说明它是 challenge-response，但**尚不能判定 ACK 是否为 authMsg 的纯函数** ——
+两次样本的会话（以及 key）都不同，属于混淆变量。
+
+**要分离这个变量，需要同一 key、两次不同 authMsg 的配对**（见 §10）。
+
+## 10. 本轮最终状态
+
+### 已确定（可直接用于实现）
+
+1. `authMsgAck = OAuth::hmac<T>(authMsg, key)`
+2. `T` 由 `mAuthAlgorithmVal` 选择：**1=MD5, 2=SHA1, 4=SHA256**；实测 =4（SHA256）
+3. **该 HMAC 的 opad 是 `0x6a`（非标准，标准为 `0x5c`）** —— 三种摘要一致
+4. key 来自 option `0x100041` → `WifiDisplaySink+0x1180`（日志称 "lyra auth key"）
+5. `authKeyType` 决定 `genAuthKey` 分支：**1 或 2**；实测回 `authKeyType=2` → 直接取成员串
+6. **无鉴权绕过**：未知 `mAuthAlgorithmVal` → 报错 + `401 Unauthorized` + 销毁会话
+7. `safetyIntegrityData` 与鉴权无关（是 `av_crc` 包装）
+
+### 唯一缺口
+
+**`option 0x100041` 返回的 key 的确切字节形态**（U1），
+以及 `authMsg` 传给 hmac 时是 ASCII 还是 hex 解码（U2）。
+
+已穷尽尝试（**全部 0 命中**）：
+* 标准 HMAC（opad 0x5c）与**非标准 HMAC（opad 0x6a）**
+* {MD5, SHA1, SHA256} × {ASCII, hex} msg × {ASCII, hex} key
+* 136 种 key 形态（16 字符 / 32 字符 UUID / hex 解码 / md5 / sha256 截断）
+* 正序与反序
+* 两个方向的实测配对
+
+### 为什么仍缺
+
+两次抓到的 RTSP 鉴权交换都属于**已结束的会话**，而这两次会话的
+`SET_MIRROR_KEY`/logcat 密钥都已轮转或被清空 ——
+**始终没能拿到「同一次会话」的 key + challenge 配对**。
+这是纯粹的数据采集时序问题，不是分析问题。
+
+### 下一步（唯一有效路径）
+
+**在同一时间窗口内同时拿到 8899 的 `setMirrorKey` 与 RTSP 的 `authMsg`/`authMsgAck`。**
+具体：
+1. `adb logcat -c` 清日志（**先确认 adb 在线**，本轮曾掉线导致空采）
+2. 同时启动 tcpdump（`host <平板> and host <音箱>`，不要按端口过滤）
+3. 触发一次**全新投送**
+4. 从 logcat 取 `authKey`，从 pcap 取 `authMsg`/`authMsgAck`
+5. 用 §4 的 `miplay_hmac(sha256, key, msg)` 直接验证
+
+拿到配对后，U1/U2/U3 可在几分钟内逐个判定。
