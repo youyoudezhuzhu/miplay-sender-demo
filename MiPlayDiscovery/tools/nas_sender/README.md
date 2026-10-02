@@ -93,6 +93,32 @@ plaintext) does **not** fire for this path, so the control channel does not use
 that class -- `EncryKey::GetStringAesKey` and `AES_CBC_encrypt_buffer` are the
 more likely entry points for the next attempt.
 
+## 0x29 is byte-structurally identical to the official frame
+
+Compared directly against the captured official frame:
+
+```
+OFFICIAL: 240029 05bf 00000028 b17e5e1dbd20c32d9b66ec4e8726d3d528480116
+NAS     : 240029 0000 00000028 <20 random bytes as 40 hex chars>
+          outer=0x00  cmd=0x29  bodyLen=40  body=40 ASCII hex
+```
+
+Everything matches -- outer, cmd, body length, body shape (40 ASCII hex chars,
+i.e. the hex STRING of 20 random bytes, not 20 raw bytes). The only difference
+is the seq value, and mirroring the peer's seq has already been tried.
+
+So the AUTH_20 frame is not malformed. The remaining explanations are about
+*connection state* or *prior setup*, not about this frame's bytes.
+
+## Hook coverage limits found
+
+`Interceptor.attach` on libc `send`/`sendto`/`write`/`writev`/`sendmsg`, filtered
+to 0x24-prefixed MiPlay frames, only ever reports **fd=239** (the audio RTP
+channel). The 8899 control socket (fd 207, confirmed via `ss -tnp`) never shows
+up, so the control channel does not write through those libc entry points --
+it goes through the library's own socket wrappers. Hooking the library's write
+path (`mirror::net::TCPSession::writeMore` / `writeDirect`) is the next step.
+
 Keep the parser fix: it was a real bug and it is still correct.
 
 ## The real blocker now: a 3-second idle timeout
