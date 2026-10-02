@@ -58,7 +58,40 @@ NAS talking:
 
 Also verified: my capability offer frame is byte-identical to the official
 sender's (`24140000010000008103636d641e00000078...`). So the content is not the
-issue -- whatever the speaker objects to happens at or before AUTH_20.
+issue -- whatever the speaker objects to happens at AUTH_20.
+
+## What root made visible (Frida on the live service)
+
+The tablet is now rooted (KernelSU) and `frida-server` runs as root, so the
+official sender can be observed. Hooking the service confirmed the plaintext
+order of the official handshake, straight off the wire:
+
+```
+-> 0x36 GET_VERSION
+-> 0x29 AUTH_20  = b17e5e1dbd20c32d9b66ec4e8726d3d528480116   <- RANDOM 20 bytes
+-> 0x00 capability offer                  (plaintext, 129-byte frame)
+<- 0x01 negotiate ack   {"result":"0"}    (plaintext)
+<- 0x02 encrypted challenge
+-> 0x03 encrypted ack
+```
+
+Two corrections to this sender came out of that:
+
+* **AUTH_20 must be 20 random bytes.** It was a fixed `0001..13` pattern.
+  Now `secrets.token_bytes(20).hex()`.
+* **AUTH_20 must wait for the speaker's `0x37`** and mirror the speaker's seq.
+  It was being fired back-to-back with GET_VERSION using seq 1.
+
+Both are fixed. The speaker still closes immediately after AUTH_20, but the
+failure now happens at exactly the same point as before with a
+protocol-correct message, which localises the remaining difference to the
+AUTH_20 step itself or to something the official sender establishes before it
+that we do not.
+
+`SafetyDataDeal::encryptData` (the hook I expected to catch the outgoing
+plaintext) does **not** fire for this path, so the control channel does not use
+that class -- `EncryKey::GetStringAesKey` and `AES_CBC_encrypt_buffer` are the
+more likely entry points for the next attempt.
 
 Keep the parser fix: it was a real bug and it is still correct.
 

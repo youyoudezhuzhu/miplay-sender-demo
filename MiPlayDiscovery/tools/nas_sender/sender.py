@@ -19,6 +19,7 @@ reports/MIPLAY_CMD_KEY_LIFECYCLE_V6.md and MIPLAY_AUDIO_PUSH_PROTOCOL.md §7):
 """
 import argparse
 import json
+import secrets
 import socket
 import struct
 import sys
@@ -56,6 +57,9 @@ class NasSender:
         self.muxer = TsMuxer()
         self._lock = threading.Lock()
         self.negotiated = None
+        self.mode_seen = False
+        self.peer_seq = 0
+        self.speaker_version = None
 
     # ------------------------------------------------------------------ send
     def send(self, cmd, body, outer=0, plain=False, seq=None):
@@ -98,9 +102,14 @@ class NasSender:
             tag = 'PLAIN'
         if cmd == 0x28:
             self.device_id = pt.decode('ascii', 'replace').rstrip('\x00')
-            self.log('[ctrl] <- 0x28 DEVICE_ID %s' % self.device_id)
+            self.peer_seq = seq
+            self.log('[ctrl] <- 0x28 DEVICE_ID %s (peer seq=%d)' % (self.device_id, seq))
         elif cmd == 0x37:
+            self.speaker_version = pt
             self.log('[ctrl] <- 0x37 speaker version %r' % pt[:24])
+        elif cmd == 0x22:
+            self.mode_seen = True
+            self.log('[ctrl] <- 0x22 %r' % pt[:40])
         elif cmd == CMD_SAFETY_AUTH:
             self._on_challenge(pt)
         elif cmd == 0x01:
@@ -142,16 +151,30 @@ class NasSender:
         threading.Thread(target=self.pump, args=(stop,), daemon=True).start()
         time.sleep(1.0)
 
-        # 3. plaintext handshake
+        # 3. plaintext handshake, in the official order (verified from capture):
+        #      -> GET_VERSION (seq 0), then WAIT for speaker 0x37
+        #      -> AUTH_20 (20 RANDOM bytes as 40 hex), then WAIT for speaker 0x22
+        #      -> capability offer (PLAINTEXT)
+        # The official sender's AUTH_20 is random per session, e.g.
+        #   b17e5e1dbd20c32d9b66ec4e8726d3d528480116
         self.send(CMD_GET_VERSION, (SENDER_VERSION + '\x00').encode(),
                   plain=True, seq=0)
-        auth20 = bytes(range(20)).hex().encode()      # 40 ASCII hex chars
-        self.send(CMD_AUTH20, auth20, plain=True)
-        time.sleep(0.5)
-        # Byte-exact copy of the official sender's offer. It matters: the real
-        # one uses TAB indentation and a trailing ' \n' after the last value,
-        # giving a 120-byte JSON. A space-indented dump is 3 bytes shorter and
-        # our earlier attempt with it made the speaker drop the connection.
+        for _ in range(30):
+            if self.speaker_version is not None:
+                break
+            time.sleep(0.1)
+        self.log('[ctrl] speaker version seen=%s' % (self.speaker_version is not None))
+
+        # Mirror the speaker's sequence number, as the real sender does.
+        auth20 = secrets.token_bytes(20).hex().encode()
+        self.send(CMD_AUTH20, auth20, plain=True, seq=self.peer_seq)
+        # the speaker answers AUTH_20 with its 0x22 pair (mode/mediaInfoEx/state)
+        for _ in range(30):
+            if self.mode_seen:
+                break
+            time.sleep(0.1)
+        self.log('[ctrl] speaker mode seen=%s' % self.mode_seen)
+
         offer = ('{\n'
                  '\t"aesIvTypes": "7",\n'
                  '\t"aesKeyTypes": "7",\n'
@@ -159,22 +182,8 @@ class NasSender:
                  '\t"authKeyTypes": "3",\n'
                  '\t"integrityTypes": "1" \n'
                  '} \n')
-        # IMPORTANT: the official sender emits this offer in the CLEAR
-        # (verified in the capture: plaintext body, not the 000701e0 envelope).
+        # The official sender emits this offer in the CLEAR.
         self.send(CMD_OPEN, tlv('cmd', offer), outer=CMD_WRAPPER, plain=True)
-        # wait for the speaker's negotiation ack (plaintext cmd 0x01)
-        for _ in range(40):
-            if self.negotiated:
-                break
-            time.sleep(0.25)
-        self.log('[ctrl] negotiated=%s' % (self.negotiated or b'<none>')[:120])
-        # give the speaker time to send its encrypted auth challenge (cmd 0x02)
-        for _ in range(40):
-            if self.auth_msg:
-                break
-            time.sleep(0.25)
-        self.log('[ctrl] challenge seen=%s' % bool(self.auth_msg))
-        time.sleep(0.3)
 
         # 4. tell the speaker where to dial, and with which keys
         self.send(CMD_SET_MIRROR_KEY, json.dumps({
