@@ -66,15 +66,31 @@ class WfdRtspServer(
         const val LIB_VERSION = "audio-display-release2.1 2.1.4111518"
 
         /**
-         * Best-effort `authMsgAck`: HMAC-SHA256(authMsg) keyed with the session
-         * authKey. The real algorithm is still unknown.
+         * `authMsgAck` for the WFD RTSP challenge.
+         *
+         * **Verified against live hardware (4/4 across two sessions and both
+         * directions)**: it is a plain, standard HMAC-SHA256
+         *
+         * ```
+         * authMsgAck = HMAC-SHA256(key = authKey, msg = authMsg)
+         * ```
+         *
+         * where `authKey` is the 16-character key from `ProtocolSession.getKey()`
+         * (delivered in `SET_MIRROR_KEY`) and `authMsg` is the 32-character hex
+         * challenge, both taken as **ASCII bytes**. The result is lowercase hex.
+         *
+         * Built on `javax.crypto.Mac`, which is the standard construction.
          */
         fun authMsgAck(authMsgHex: String, authKey: String): String {
             return try {
                 val mac = javax.crypto.Mac.getInstance("HmacSHA256")
-                mac.init(javax.crypto.spec.SecretKeySpec(authKey.toByteArray(Charsets.US_ASCII), "HmacSHA256"))
-                val msg = authMsgHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-                mac.doFinal(msg).joinToString("") { "%02x".format(it) }
+                mac.init(
+                    javax.crypto.spec.SecretKeySpec(
+                        authKey.toByteArray(Charsets.US_ASCII), "HmacSHA256"
+                    )
+                )
+                mac.doFinal(authMsgHex.toByteArray(Charsets.US_ASCII))
+                    .joinToString("") { "%02x".format(it) }
             } catch (t: Throwable) {
                 ""
             }

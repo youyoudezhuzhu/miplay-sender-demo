@@ -331,3 +331,68 @@ ANetworkSession::destroySession(...);          // 直接销毁会话
 5. 用 §4 的 `miplay_hmac(sha256, key, msg)` 直接验证
 
 拿到配对后，U1/U2/U3 可在几分钟内逐个判定。
+
+---
+
+# ★★ 结论修正（本轮实测，推翻本文 §4）
+
+## 真正的答案
+
+```
+authMsgAck = HMAC-SHA256(key = authKey, msg = authMsg)      ← 标准 HMAC，无任何变体
+```
+
+* `authKey`：`ProtocolSession.getKey()` 的 16 字符值（经 `SET_MIRROR_KEY` 下发）
+* `authMsg`：32 字符挑战串
+* **两者都按 ASCII 字节直接参与运算**（不 hex 解码）
+* 输出：64 字符小写 hex
+
+## 实测验证：4/4 全中
+
+| 会话 | 密钥生成时刻 | authMsg | 结果 |
+| --- | --- | --- | --- |
+| A | 15:32:32.072 | `25e1d5733eff0008f56e81eb04eb87a8` | ✅ MATCH |
+| A | 15:32:32.072 | `7f490a69948c805f992d461bb4f2faee` | ✅ MATCH |
+| B | 15:31:47.931 | `794a11ae931cbcd1dc9068624a642a39` | ✅ MATCH |
+| B | 15:31:47.931 | `47fe880cf6852fe762c5d5e894172029` | ✅ MATCH |
+
+会话密钥（`uuid[:16]`）：
+```
+A: authKey = 2feb068001324c98   (uuid 2feb068001324c98a5a121fd88a3f545)
+B: authKey = 769a326df0ac49f0   (uuid 769a326df0ac49f0a46bffe51b27be03)
+```
+两个方向都覆盖到了 → **不是纯函数疑问也已解除**。
+
+**代码已落地并加测试**：`WfdRtspServer.authMsgAck()` +
+`AuthMsgAckTest`（4 条真实报文向量），全套 **33/33 通过**。
+
+## ❌ 自我纠错：本文 §4 的「非标准 opad 0x6a」是**误读**
+
+我在 §4 声称「`OAuth::hmac` 的 opad 是 `0x6a`，不是标准的 `0x5c`」，
+并把它当成此前的核心发现。**这是错的**，原因是我对反编译输出做了错误的寄存器追踪：
+
+* 反编译里那两处 `^ 0x3636…` / `^ 0x6a6a…` 常量出现在**模板实例化的不同分支**，
+  我把其中一个内联副本（或相邻 helper 的常量）误当成了 opad；
+* 实测证明：**用标准 `hmac.new(key, msg, sha256)` 一次命中，4/4**。
+  若 opad 真是 `0x6a`，标准实现绝无可能匹配。
+
+**教训**（值得记录）：反编译伪码里的常量**必须回到汇编逐条确认其数据流**，
+不能凭上下文假设它属于哪个式子。这一条与 §0 排除 `safetyIntegrityData`
+是同一类错误的正反面 —— 那次我因为看了汇编而没被函数名骗到，
+这次我因为只看了伪码而被常量位置骗到。
+
+## 为什么前几轮一直失败
+
+不是算法问题，是**配对问题**：此前拿到的 `authMsg/authMsgAck` 与手上的
+`authKey` 始终来自**不同会话**（日志轮转 / 采集窗口错位）。
+本轮通过「先 arm 双路采集 → 用户断开重连音箱」保证三者同源，**一次命中**。
+
+## 对音频推流的意义
+
+**鉴权阻塞点已解除。** `WfdRtspServer` 现在可以正确应答挑战：
+收到 `authMsg` → 回 `authMsgAck = HMAC-SHA256(authKey, authMsg)`。
+
+剩余待办就只剩工程性的了：
+1. MP3 → AAC-LATM（MediaCodec）
+2. 通过 8899 把 `wfd://<ip>:<port>?mirrorMode=1` 告知音箱（触发它反向拨入）
+3. 上机联调
