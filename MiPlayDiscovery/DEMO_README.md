@@ -178,3 +178,43 @@ python3 MiPlayDiscovery/tools/verify_live.py <logcat.txt> <capture.pcap>
 `toJson:authKey:XXXX ,streamKey:YYYY ,streamIV:ZZZZ` 两类行。）
 
 未被解开的 4 帧属于会话中途**密钥轮换**前后的边界帧，属预期现象。
+
+---
+
+## 8. 第二轮：音频推流骨架（进行中）
+
+完整协议还原见 [`reports/MIPLAY_AUDIO_PUSH_PROTOCOL.md`](../reports/MIPLAY_AUDIO_PUSH_PROTOCOL.md)。
+
+### 8.1 已实现
+
+| 组件 | 文件 | 测试 |
+| --- | --- | --- |
+| **MPEG-TS 复用器** | `media/TsMuxer.kt` | ✅ 10 项 |
+| **WFD RTSP 服务端** | `media/WfdRtspServer.kt` | 结构已实现 |
+| **RTSP 交织帧** | （在 `WfdRtspServer` 内） | ✅ 4 项 |
+
+`TsMuxer` 按实测布局产出：PAT `0x0000` / PMT `0x0100` / PCR `0x1000` /
+音频 PES `0x1100`（`stream_id=0xC0`，带 PTS）。
+
+`WfdRtspServer` 按实测对话应答：`OPTIONS` → `GET_PARAMETER`（回
+`wfd_audio_codecs_v2` / `wfd_video_formats: none` /
+`wfd_client_rtp_ports: RTP/AVP/TCP;interleaved mode=play`）→ `SET_PARAMETER` →
+`SETUP` → `PLAY`，并在同一 TCP 连接上按 `'$'|ch|len` 交织发送 TS。
+
+### 8.2 仍然缺的三块
+
+1. **`authMsg` → `authMsgAck` 算法未解**
+   —— 实测配对（`fcb9521c...` → `cab7a6f7...`）已尝试
+   `HMAC-SHA256/SHA1` × 多把密钥 × 正反序 × 拼接，**全部不匹配**。
+   这是**最大风险**：音箱可能因此拒绝会话。
+2. **MP3 → AAC-LATM 转码**：需要 `MediaCodec`（`audio/mp4a-latm`）接线。
+3. **与 8899 控制通道的联动**：`PLAY` 前需要把
+   `wfd://<ip>:<port>?mirrorMode=1` 通过 `SET_MIRROR_KEY` 那条路径告知音箱。
+
+### 8.3 测试
+
+```
+./gradlew :miplay-sender:testDebugUnitTest     # 27/27 通过
+```
+
+覆盖：帧格式 + CRC（13）、MPEG-TS 复用（10）、RTSP 交织帧（4）。
