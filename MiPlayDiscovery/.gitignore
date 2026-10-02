@@ -1,0 +1,13 @@
+# Gradle / Android build output
+.gradle/
+build/
+*/build/
+local.properties
+
+# IDE
+.idea/
+*.iml
+.DS_Store
+
+# Python bytecode from the evidence capture tooling
+__pycache__/

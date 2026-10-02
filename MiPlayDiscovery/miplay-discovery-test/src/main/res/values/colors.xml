@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="miplay_background">#FFF5F5F7</color>
+    <color name="miplay_surface">#FFFFFFFF</color>
+    <color name="miplay_primary">#FF3C8CFF</color>
+    <color name="miplay_on_primary">#FFFFFFFF</color>
+    <color name="miplay_text">#FF1C1C1E</color>
+    <color name="miplay_text_secondary">#FF6B6B70</color>
+    <color name="miplay_mono_background">#FF14161A</color>
+    <color name="miplay_mono_text">#FFD6E2F0</color>
+    <color name="miplay_divider">#FFE3E3E8</color>
+</resources>

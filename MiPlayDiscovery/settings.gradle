@@ -1,0 +1,26 @@
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.name = "MiPlayDiscovery"
+
+// Reusable MiPlay Sender-side discovery engine.
+include ':miplay-discovery'
+
+// Sender-side control-channel client (TCP 8899) + session crypto.
+include ':miplay-sender'
+
+// Standalone test harness app (the "第一阶段 UI").
+include ':miplay-discovery-test'
